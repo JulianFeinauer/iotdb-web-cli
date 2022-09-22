@@ -174,7 +174,7 @@ def main():
         print(__version__)
         exit(0)
     # app.config["cmd"] = [args.command] + shlex.split(args.cmd_args)
-    app.config["cmd"] = ["/iotdb/sbin/start-cli.sh"]
+    app.config["cmd"] = ["/iotdb/sbin/start-cli.sh", "-h", "iotdb"]
     green = "\033[92m"
     end = "\033[0m"
     log_format = green + "pyxtermjs > " + end + "%(levelname)s (%(funcName)s:%(lineno)s) %(message)s"
