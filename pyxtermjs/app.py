@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
+import logging
+import os
+import pty
+import select
+import shlex
+import struct
+import subprocess
+import sys
+import termios
+import threading
+from datetime import datetime
+from time import sleep
+
+import requests as requests
 from flask import Flask, render_template
 from flask_socketio import SocketIO
-import pty
-import os
-import subprocess
-import select
-import termios
-import struct
-import fcntl
-import shlex
-import logging
-import sys
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 __version__ = "0.5.0.0"
 
-app = Flask(__name__, template_folder=".", static_folder=".", static_url_path="")
+os.environ["FLASK_DEBUG"] = "1"
+
+app = Flask(__name__, template_folder=".", static_folder=".", static_url_path="", )
 app.config["SECRET_KEY"] = "secret!"
 app.config["fd"] = None
 app.config["child_pid"] = None
 socketio = SocketIO(app)
+
+last_ping = None
 
 
 def set_winsize(fd, row, col, xpix=0, ypix=0):
@@ -47,6 +56,11 @@ def index():
     return render_template("index.html")
 
 
+
+@app.route("/shutdown")
+def shutdown():
+    socketio.stop()
+
 @socketio.on("pty-input", namespace="/pty")
 def pty_input(data):
     """write to the child pty. The pty sees this as if you are typing in a real
@@ -57,11 +71,28 @@ def pty_input(data):
         os.write(app.config["fd"], data["input"].encode())
 
 
+@socketio.on("pty-ping", namespace="/pty")
+def pty_ping(data):
+    global last_ping
+    last_ping = datetime.now()
+    # print(f"Last ping: {last_ping}")
+
 @socketio.on("resize", namespace="/pty")
 def resize(data):
     if app.config["fd"]:
         logging.debug(f"Resizing window to {data['rows']}x{data['cols']}")
         set_winsize(app.config["fd"], data["rows"], data["cols"])
+
+
+
+def check_pid(pid):
+    """ Check For the existence of a unix pid. """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    else:
+        return True
 
 
 @socketio.on("connect", namespace="/pty")
@@ -70,7 +101,22 @@ def connect():
     logging.info("new client connected")
     if app.config["child_pid"]:
         # already started child process, don't start another
-        return
+        # check if this one is still active
+        pid = app.config["child_pid"]
+
+        print(f"Child pid: {pid}")
+
+        fd_available = True
+        try:
+            os.write(app.config["fd"], " \u007F".encode())
+        except OSError as e:
+            fd_available = False
+
+        if fd_available:
+            print("Child is still active, killing it...")
+            os.kill(pid, 9)
+        else:
+            print("Child has died...")
 
     # create child process attached to a pty we can read from and write to
     (child_pid, fd) = pty.fork()
@@ -79,6 +125,7 @@ def connect():
         # anything printed here will show up in the pty, including the output
         # of this subprocess
         subprocess.run(app.config["cmd"])
+        os.kill(os.getpid(), 9)
     else:
         # this is the parent process fork.
         # store child fd and pid
@@ -90,7 +137,7 @@ def connect():
         # but if they come before the background task never starts
         socketio.start_background_task(target=read_and_forward_pty_output)
 
-        logging.info("child pid is " + child_pid)
+        logging.info(f"child pid is {child_pid}")
         logging.info(
             f"starting background task with command `{cmd}` to continously read "
             "and forward pty output to client"
@@ -126,7 +173,8 @@ def main():
     if args.version:
         print(__version__)
         exit(0)
-    app.config["cmd"] = [args.command] + shlex.split(args.cmd_args)
+    # app.config["cmd"] = [args.command] + shlex.split(args.cmd_args)
+    app.config["cmd"] = ["/Users/julian/Downloads/apache-iotdb-0.13.0-all-bin/sbin/start-cli.sh"]
     green = "\033[92m"
     end = "\033[0m"
     log_format = green + "pyxtermjs > " + end + "%(levelname)s (%(funcName)s:%(lineno)s) %(message)s"
@@ -136,6 +184,28 @@ def main():
         level=logging.DEBUG if args.debug else logging.INFO,
     )
     logging.info(f"serving on http://{args.host}:{args.port}")
+
+    start_time = datetime.now()
+
+    def watch_dog():
+        while True:
+            if last_ping is None:
+                # check how old the process is
+                duration = datetime.now() - start_time
+                print(f"Runtime without ping {duration.total_seconds()}")
+                if duration.total_seconds() > 120:
+                    requests.get(f"http://localhost:{args.port}/shutdown")
+            else:
+                # we have a ping
+                duration = datetime.now() - last_ping
+                print(f"Last ping {duration.total_seconds()}")
+                if duration.total_seconds() > 120:
+                    requests.get(f"http://localhost:{args.port}/shutdown")
+            sleep(5)
+
+    wthread = threading.Thread(target=watch_dog)
+    wthread.setDaemon(True)
+    wthread.start()
     socketio.run(app, debug=args.debug, port=args.port, host=args.host)
 
 

@@ -34,6 +34,16 @@ ch.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
 
     <script>
+        function sendPing() {
+            console.log("ping...")
+            try {
+                socket.emit("pty-ping", "ping");
+            } catch (e) {
+                console.log("Unable to ping...")
+            }
+            setTimeout(sendPing, 5000)
+        }
+        sendPing()
       const term = new Terminal({
         cursorBlink: true,
         macOptionIsMeta: true,
